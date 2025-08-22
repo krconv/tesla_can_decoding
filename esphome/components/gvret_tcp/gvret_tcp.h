@@ -16,6 +16,13 @@ extern "C" {
   #include <errno.h>
 }
 
+extern "C" {
+  #include "esp_timer.h"   // ESP-IDF micros
+}
+static inline uint32_t gvret_micros() {
+  return (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL);
+}
+
 namespace esphome {
 namespace gvret_tcp {
 
@@ -30,30 +37,29 @@ class GvretTcpServer : public Component {
   void set_bus_index(uint8_t idx) { bus_index_ = idx; }
   GvretOnTransmitTrigger *get_on_transmit_trigger() { return &on_transmit_; }
 
-  // Forward CAN frame → SavvyCAN
+  // Called from canbus.on_frame lambda
   void forward_frame(const canbus::CanFrame &frame);
 
   void setup() override;
   void loop() override;
   void dump_config() override;
 
- protected:
+ private:
+  // networking
   void start_server_();
   void accept_client_();
   void close_client_();
-
   void send_record_(const uint8_t *data, size_t len);
   bool recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len);
 
+  // gvret
   void encode_frame_(const canbus::CanFrame &f, std::array<uint8_t, 22> &out);
-  void handle_incoming_(const uint8_t *buf, size_t len);
+  void reply_heartbeat_();    // F1 09 -> F1 09 DE AD
+  void reply_time_sync_();    // F1 01 -> F1 01 <u32 micros>
+  void reply_device_info_();  // F1 07 -> F1 07 <meta + "ESPHome-GVRET\0">
+  void reply_bus_config_();   // F1 06 -> F1 06 <bitrate…>
 
-  void reply_heartbeat_();
-  void reply_time_sync_();
-  void reply_device_info_();
-  void reply_bus_config_();
-
-  uint32_t uptime_us_() const { return (uint32_t)(micros() & 0xFFFFFFFFUL); }
+  uint32_t uptime_us_() const { return gvret_micros(); }
 
   uint16_t port_{23};
   uint8_t bus_index_{0};
@@ -69,4 +75,4 @@ class GvretTcpServer : public Component {
 };
 
 }  // namespace gvret_tcp
-}  // namespace esphome
+}  // na

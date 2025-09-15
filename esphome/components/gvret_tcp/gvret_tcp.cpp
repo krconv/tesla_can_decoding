@@ -1,5 +1,8 @@
 #include "gvret_tcp.h"
 #include "esphome/core/log.h"
+#include "esphome/components/wifi/wifi_component.h"
+
+using esphome::wifi::global_wifi_component;
 
 namespace esphome {
 namespace gvret_tcp {
@@ -8,11 +11,14 @@ static const char *const TAG = "gvret_tcp";
 
 void GvretTcpServer::setup() {
   rx_buf_.reserve(512);
-  start_server_();
 }
 
 void GvretTcpServer::loop() {
-  if (server_fd_ < 0) { start_server_(); return; }
+  if (server_fd_ < 0) {
+    if (global_wifi_component == nullptr || !global_wifi_component->is_connected()) return;
+    start_server_();
+    return;
+  }
   if (client_fd_ < 0) { accept_client_(); }
 
   // flush TX queue

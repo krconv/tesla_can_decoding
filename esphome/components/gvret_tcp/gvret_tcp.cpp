@@ -118,7 +118,7 @@ void GvretTcpServer::loop() {
 
         if (rx_buf_[0] != GVRET_HEADER || rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
-        ESP_LOGD(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
+        ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
         if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (19 bytes)
           if (rx_buf_.size() < 19) break;
@@ -223,20 +223,6 @@ void GvretTcpServer::close_client_() {
 
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {
   if (client_fd_ < 0) return;
-  // Build hex representation of payload
-  // std::string hex;
-  // hex.reserve(len * 3);
-  // for (size_t i = 0; i < len; i++) {
-  //   char b[4];
-  //   snprintf(b, sizeof(b), "%02X", data[i]);
-  //   hex.append(b);
-  //   if (i + 1 < len) hex.push_back(' ');
-  // }
-  // if (len >= 2 && data[0] == 0xF1) {
-  //   ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes) :: %s", data[1], (unsigned) len, hex.c_str());
-  // } else {
-  //   ESP_LOGI(TAG, "TX: %u bytes :: %s", (unsigned) len, hex.c_str());
-  // }
   send(client_fd_, data, len, 0);
 }
 

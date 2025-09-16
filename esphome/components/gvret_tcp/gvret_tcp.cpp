@@ -78,10 +78,10 @@ void GvretTcpServer::loop() {
           if (rx_buf_.size() < 22) break;
 
           canbus::CanFrame f{};
-          // Expected layout: [F1][00][bus][dlc][id0][id1][id2][id3][flags0][flags1][ts0..3][data0..7]
-          uint8_t dlc = rx_buf_[3];
-          uint32_t can_id = (uint32_t)rx_buf_[4] | ((uint32_t)rx_buf_[5] << 8) |
-                            ((uint32_t)rx_buf_[6] << 16) | ((uint32_t)rx_buf_[7] << 24);
+          // GVRET binary frame layout: [F1][00][bus][id0][id1][id2][id3][dlc][flags0][flags1][ts0..3][data0..7]
+          uint32_t can_id = (uint32_t)rx_buf_[3] | ((uint32_t)rx_buf_[4] << 8) |
+                            ((uint32_t)rx_buf_[5] << 16) | ((uint32_t)rx_buf_[6] << 24);
+          uint8_t dlc = rx_buf_[7];
           f.can_id = can_id;
           f.can_data_length_code = dlc;
 
@@ -205,13 +205,13 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t
 
   out[0] = 0xF1; out[1] = 0x00; out[2] = bus_index_;
 
-  // Expected layout: [F1][00][bus][dlc][id0][id1][id2][id3][flags0][flags1][ts0..3][data0..7]
+  // GVRET binary frame layout: [F1][00][bus][id0][id1][id2][id3][dlc][flags0][flags1][ts0..3][data0..7]
+  uint32_t id = f.can_id;
+  out[3] = id & 0xFF; out[4] = (id >> 8) & 0xFF; out[5] = (id >> 16) & 0xFF; out[6] = (id >> 24) & 0xFF;
+
   uint8_t dlc = f.can_data_length_code;
   if (dlc > 8) dlc = 8;
-  out[3] = dlc;
-
-  uint32_t id = f.can_id;
-  out[4] = id & 0xFF; out[5] = (id >> 8) & 0xFF; out[6] = (id >> 16) & 0xFF; out[7] = (id >> 24) & 0xFF;
+  out[7] = dlc;
 
   uint16_t flags = (f.use_extended_id ? 0x0001 : 0) | (f.remote_transmission_request ? 0x0002 : 0);
   out[8] = flags & 0xFF; out[9] = flags >> 8;

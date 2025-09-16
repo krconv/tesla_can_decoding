@@ -93,11 +93,9 @@ void GvretTcpServer::loop() {
       rec = tx_queue_.front();
       tx_queue_.pop();
     }
-    ESP_LOGI(TAG, "TX: sending 19B frame (queued)");
+    ESP_LOGI(TAG, "TX: sending %dB frame ", (int) rec.size());
     send_record_(rec.data(), rec.size());
     tx_sent++;
-    if (tx_sent >= 16) break;  // cap per iteration
-    if (uptime_us_() - loop_start > LOOP_BUDGET_US) break;  // honor time budget
   }
 
   // read + parse
@@ -105,7 +103,7 @@ void GvretTcpServer::loop() {
     uint8_t buf[128];
     ssize_t rlen = 0;
     if (recv_bytes_(buf, sizeof(buf), rlen) && rlen > 0) {
-      ESP_LOGI(TAG, "RX: received %d bytes", (int) rlen);
+      ESP_LOGI(TAG, "RX: received %dB frame", (int) rlen);
       rx_buf_.insert(rx_buf_.end(), buf, buf + rlen);
 
       size_t parsed = 0;
@@ -245,13 +243,10 @@ void GvretTcpServer::close_client_() {
 
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {
   if (client_fd_ < 0) return;
-  static uint32_t txlog = 0; txlog++;
-  if ((txlog & 0x0F) == 0) {  // log every 16th send to reduce spam
-    if (len >= 2 && data[0] == 0xF1) {
-      ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes)", data[1], (unsigned) len);
-    } else {
-      ESP_LOGI(TAG, "TX: %u bytes", (unsigned) len);
-    }
+  if (len >= 2 && data[0] == 0xF1) {
+    ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes)", data[1], (unsigned) len);
+  } else {
+    ESP_LOGI(TAG, "TX: %u bytes", (unsigned) len);
   }
   send(client_fd_, data, len, 0);
 }

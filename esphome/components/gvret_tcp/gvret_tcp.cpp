@@ -1,6 +1,7 @@
 #include "gvret_tcp.h"
 #include "esphome/core/log.h"
 #include "esphome/components/wifi/wifi_component.h"
+#include <cstdio>
 extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
@@ -43,7 +44,7 @@ void GvretTcpServer::loop() {
   // flush TX queue (bounded)
   size_t tx_sent = 0;
   while (client_fd_ >= 0) {
-    std::array<uint8_t, 19> rec;
+    std::vector<uint8_t> rec;
     {
       std::lock_guard<std::mutex> lk(q_mutex_);
       if (tx_queue_.empty()) break;
@@ -125,7 +126,7 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   // Drop 99.99% of frames for testing (keep 1 out of 10000)
   if ((ff_cnt % 500) != 0) return;
 
-  std::array<uint8_t, 19> rec;
+  std::vector<uint8_t> rec;
   encode_frame_(f, rec);
   bool in_isr = in_isr_context();
   ESP_LOGI(TAG, "forward_frame(sampled): isr=%d id=0x%08X dlc=%u ext=%d rtr=%d (count=%u)",
@@ -215,28 +216,44 @@ bool GvretTcpServer::recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len) 
 
 // ---- Encode (F1 00 record, 19 bytes) ----
 
-void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t,19>& out) {
-  for (auto &b : out) b = 0;
+void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t>& out) {
+  out.clear();
+  if (binary_mode_) {
+    // Binary: [TS LE 4][ID LE 4 (bit31=ext)][DLC|(bus<<4)][DATA]
+    uint32_t ts = uptime_us_();
+    uint32_t id = (f.use_extended_id ? (f.can_id & 0x1FFFFFFF) : (f.can_id & 0x7FF));
+    if (f.use_extended_id) id |= (1u << 31);
+    uint8_t dlc = f.can_data_length_code; if (dlc > 8) dlc = 8;
+    uint8_t dlc_bus = (uint8_t)((dlc & 0x0F) | ((bus_index_ & 0x0F) << 4));
 
-  out[0] = 0xF1; out[1] = 0x00;
-
-  // Timestamp little-endian (bytes 2..5)
-  uint32_t ts = uptime_us_();
-  out[2] = ts & 0xFF; out[3] = (ts >> 8) & 0xFF; out[4] = (ts >> 16) & 0xFF; out[5] = (ts >> 24) & 0xFF;
-
-  // [11:04:06][I][gvret_tcp:243]: Frame CAN->TX (19B): id=0x00000118 dlc=8 ext=0 rtr=0 ts=646704316
-
-
-  // CAN ID little-endian (bytes 6..9). Mask to the correct width.
-  uint32_t id = (f.use_extended_id ? (f.can_id & 0x1FFFFFFF) : (f.can_id & 0x7FF));
-  out[6] = id & 0xFF; out[7] = (id >> 8) & 0xFF; out[8] = (id >> 16) & 0xFF; out[9] = (id >> 24) & 0xFF;
-
-  uint8_t dlc = f.can_data_length_code;
-  if (dlc > 8) dlc = 8;
-  out[10] = dlc;
-
-  for (uint8_t i = 0; i < dlc && i < 8; i++) out[11 + i] = f.data[i];
-  ESP_LOGI(TAG, "Frame CAN->TX (19B): id=0x%08X dlc=%u ext=%d rtr=%d ts=%u", id, dlc, f.use_extended_id, f.remote_transmission_request, ts);
+    out.reserve(9 + dlc);
+    out.push_back(ts & 0xFF);
+    out.push_back((ts >> 8) & 0xFF);
+    out.push_back((ts >> 16) & 0xFF);
+    out.push_back((ts >> 24) & 0xFF);
+    out.push_back(id & 0xFF);
+    out.push_back((id >> 8) & 0xFF);
+    out.push_back((id >> 16) & 0xFF);
+    out.push_back((id >> 24) & 0xFF);
+    out.push_back(dlc_bus);
+    for (uint8_t i = 0; i < dlc && i < 8; i++) out.push_back(f.data[i]);
+    ESP_LOGI(TAG, "Frame CAN->TX (bin): id=0x%08X dlc=%u ext=%d bus=%u ts(us)=%u", id, dlc, f.use_extended_id, bus_index_, ts);
+  } else {
+    // Text GVRET CSV: "millis,id,ext,bus,len[,data...]\r\n"
+    char line[128];
+    uint32_t ms = uptime_us_() / 1000;
+    int n = snprintf(line, sizeof(line), "%u,%x,%u,%u,%u", ms, (unsigned) f.can_id, (unsigned) (f.use_extended_id ? 1 : 0), (unsigned) bus_index_, (unsigned) f.can_data_length_code);
+    if (n < 0) n = 0; if (n > (int) sizeof(line)) n = sizeof(line);
+    out.insert(out.end(), line, line + n);
+    for (uint8_t i = 0; i < f.can_data_length_code && i < 8; i++) {
+      int m = snprintf(line, sizeof(line), ",%x", (unsigned) f.data[i]);
+      if (m < 0) m = 0; if (m > (int) sizeof(line)) m = sizeof(line);
+      out.insert(out.end(), line, line + m);
+    }
+    out.push_back('\r');
+    out.push_back('\n');
+    ESP_LOGI(TAG, "Frame CAN->TX (csv): id=0x%08X dlc=%u ext=%d bus=%u", f.can_id, f.can_data_length_code, f.use_extended_id, bus_index_);
+  }
 }
 
 // ---- Replies ----

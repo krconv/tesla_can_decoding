@@ -53,8 +53,10 @@ class GvretTcpServer : public Component {
   bool recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len);
 
   // gvret
-  // Encode frame in 19-byte format: [F1][00][TS BE 4][ID BE 4][DLC 1][DATA 8]
-  void encode_frame_(const canbus::CanFrame &f, std::array<uint8_t, 19> &out);
+  // Encode frame according to current mode.
+  // Binary mode: [TS LE 4][ID LE 4 (bit31=ext)][DLC|(bus<<4)][DATA]
+  // Text mode:   "millis,id,ext,bus,len[,data...]\r\n"
+  void encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t> &out);
   void reply_heartbeat_();    // F1 09 -> F1 09 DE AD
   void reply_time_sync_();    // F1 01 -> F1 01 <u32 micros>
   void reply_device_info_();  // F1 07 -> F1 07 <meta + "ESPHome-GVRET\0">
@@ -69,10 +71,12 @@ class GvretTcpServer : public Component {
   int client_fd_{-1};
 
   std::mutex q_mutex_;
-  std::queue<std::array<uint8_t, 19>> tx_queue_;
+  std::queue<std::vector<uint8_t>> tx_queue_;
   std::vector<uint8_t> rx_buf_;
 
   GvretOnTransmitTrigger on_transmit_;
+
+  bool binary_mode_{false};
 };
 
 }  // namespace gvret_tcp

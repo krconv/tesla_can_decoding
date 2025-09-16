@@ -104,14 +104,13 @@ void GvretTcpServer::loop() {
     uint8_t buf[128];
     ssize_t rlen = 0;
     if (recv_bytes_(buf, sizeof(buf), rlen) && rlen > 0) {
-      ESP_LOGI(TAG, "RX: received %dB frame", (int) rlen);
       rx_buf_.insert(rx_buf_.end(), buf, buf + rlen);
 
       size_t parsed = 0;
       while (!rx_buf_.empty()) {
         // Enable binary output mode
         if (rx_buf_[0] == COMMAND_ENABLE_BINARY_OUTPUT) { 
-          ESP_LOGI(TAG, "CMD: COMMAND_ENABLE_BINARY_OUTPUT (enable binary output)");
+          ESP_LOGD(TAG, "CMD: COMMAND_ENABLE_BINARY_OUTPUT (enable binary output)");
           rx_buf_.erase(rx_buf_.begin());
           binary_mode_ = true;
           continue; 
@@ -119,7 +118,7 @@ void GvretTcpServer::loop() {
 
         if (rx_buf_[0] != GVRET_HEADER || rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
-        ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
+        ESP_LOGD(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
         if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (19 bytes)
           if (rx_buf_.size() < 19) break;
@@ -140,7 +139,6 @@ void GvretTcpServer::loop() {
 
           for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
 
-          ESP_LOGI(TAG, "Frame RX->CAN (19B): id=0x%08X dlc=%u ext=%d rtr=%d", f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
           on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 19);
           continue;
@@ -150,7 +148,7 @@ void GvretTcpServer::loop() {
         if (handle_control_command_(cmd)) { rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
 
         // Unknown F1 command -> drop full command header (2 bytes)
-        ESP_LOGI(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
+        ESP_LOGW(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
         rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2);
         parsed++;
         if (parsed >= 32) break;  // cap parsed items
@@ -179,7 +177,7 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
 
 void GvretTcpServer::start_server_() {
   server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd_ < 0) { ESP_LOGI(TAG, "socket() failed: errno=%d", errno); return; }
+  if (server_fd_ < 0) { ESP_LOGW(TAG, "socket() failed: errno=%d", errno); return; }
 
   int yes = 1; setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
@@ -188,8 +186,8 @@ void GvretTcpServer::start_server_() {
   addr.sin_port = htons(port_);
   addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  if (bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) { ESP_LOGI(TAG, "bind() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
-  if (listen(server_fd_, 1) < 0) { ESP_LOGI(TAG, "listen() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
+  if (bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) { ESP_LOGW(TAG, "bind() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
+  if (listen(server_fd_, 1) < 0) { ESP_LOGW(TAG, "listen() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
 
   int flags = fcntl(server_fd_, F_GETFL, 0);
   fcntl(server_fd_, F_SETFL, flags | O_NONBLOCK);
@@ -226,19 +224,19 @@ void GvretTcpServer::close_client_() {
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {
   if (client_fd_ < 0) return;
   // Build hex representation of payload
-  std::string hex;
-  hex.reserve(len * 3);
-  for (size_t i = 0; i < len; i++) {
-    char b[4];
-    snprintf(b, sizeof(b), "%02X", data[i]);
-    hex.append(b);
-    if (i + 1 < len) hex.push_back(' ');
-  }
-  if (len >= 2 && data[0] == 0xF1) {
-    ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes) :: %s", data[1], (unsigned) len, hex.c_str());
-  } else {
-    ESP_LOGI(TAG, "TX: %u bytes :: %s", (unsigned) len, hex.c_str());
-  }
+  // std::string hex;
+  // hex.reserve(len * 3);
+  // for (size_t i = 0; i < len; i++) {
+  //   char b[4];
+  //   snprintf(b, sizeof(b), "%02X", data[i]);
+  //   hex.append(b);
+  //   if (i + 1 < len) hex.push_back(' ');
+  // }
+  // if (len >= 2 && data[0] == 0xF1) {
+  //   ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes) :: %s", data[1], (unsigned) len, hex.c_str());
+  // } else {
+  //   ESP_LOGI(TAG, "TX: %u bytes :: %s", (unsigned) len, hex.c_str());
+  // }
   send(client_fd_, data, len, 0);
 }
 
@@ -327,7 +325,6 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_
     out.push_back(dlc);
     // Data
     for (uint8_t i = 0; i < dlc && i < 8; i++) out.push_back(f.data[i]);
-    ESP_LOGI(TAG, "Frame CAN->TX (gvret bin): id=0x%08X dlc=%u ext=%d ts(us)=%u", id, dlc, f.use_extended_id, ts);
   } else {
     // Text GVRET CSV: "millis,id,ext,bus,len[,data...]\r\n"
     char line[128];
@@ -342,7 +339,6 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_
     }
     out.push_back('\r');
     out.push_back('\n');
-    ESP_LOGI(TAG, "Frame CAN->TX (csv): id=0x%08X dlc=%u ext=%d bus=%u", f.can_id, f.can_data_length_code, f.use_extended_id, bus_index_);
   }
 }
 

@@ -25,6 +25,10 @@ void GvretTcpServer::setup() {
 }
 
 void GvretTcpServer::loop() {
+  // Time budget per loop iteration to avoid starving the scheduler
+  const uint32_t LOOP_BUDGET_US = 4000;  // ~4ms
+  uint32_t loop_start = uptime_us_();
+
   if (server_fd_ < 0) {
     if (global_wifi_component == nullptr || !global_wifi_component->is_connected()) {
       ESP_LOGI(TAG, "Server not started: WiFi not connected");
@@ -36,7 +40,8 @@ void GvretTcpServer::loop() {
   }
   if (client_fd_ < 0) { accept_client_(); }
 
-  // flush TX queue
+  // flush TX queue (bounded)
+  size_t tx_sent = 0;
   while (client_fd_ >= 0) {
     std::array<uint8_t, 22> rec;
     {
@@ -47,6 +52,9 @@ void GvretTcpServer::loop() {
     }
     ESP_LOGI(TAG, "TX: sending 22B GVRET record (queued)");
     send_record_(rec.data(), rec.size());
+    tx_sent++;
+    if (tx_sent >= 16) break;  // cap per iteration
+    if (uptime_us_() - loop_start > LOOP_BUDGET_US) break;  // honor time budget
   }
 
   // read + parse
@@ -57,6 +65,7 @@ void GvretTcpServer::loop() {
       ESP_LOGI(TAG, "RX: received %d bytes", (int) rlen);
       rx_buf_.insert(rx_buf_.end(), buf, buf + rlen);
 
+      size_t parsed = 0;
       while (!rx_buf_.empty()) {
         // 0xE7 -> enable binary (no-op)
         if (rx_buf_[0] == 0xE7) { ESP_LOGI(TAG, "CMD: E7 (enable binary)"); rx_buf_.erase(rx_buf_.begin()); continue; }
@@ -96,6 +105,9 @@ void GvretTcpServer::loop() {
         // Unknown F1 command -> drop full command header (2 bytes)
         ESP_LOGI(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
         rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2);
+        parsed++;
+        if (parsed >= 32) break;  // cap parsed items
+        if (uptime_us_() - loop_start > LOOP_BUDGET_US) break;  // honor time budget
       }
     }
   }
@@ -109,13 +121,20 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   std::array<uint8_t, 22> rec;
   encode_frame_(f, rec);
   bool in_isr = in_isr_context();
-  ESP_LOGI(TAG, "forward_frame: isr=%d id=0x%08X dlc=%u ext=%d rtr=%d", in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
+  static uint32_t ff_cnt = 0;
+  ff_cnt++;
+  if (in_isr || (ff_cnt & 0x3F) == 0) {  // log every 64th call or always if ISR
+    ESP_LOGI(TAG, "forward_frame: isr=%d id=0x%08X dlc=%u ext=%d rtr=%d", in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
+  }
   {
     std::lock_guard<std::mutex> lk(q_mutex_);
     size_t before = tx_queue_.size();
     tx_queue_.push(rec);
     size_t after = tx_queue_.size();
-    ESP_LOGI(TAG, "queued GVRET record: %u -> %u", (unsigned) before, (unsigned) after);
+    static uint32_t qlog = 0; qlog++;
+    if ((qlog & 0x3F) == 0) {
+      ESP_LOGI(TAG, "queued GVRET record: %u -> %u", (unsigned) before, (unsigned) after);
+    }
   }
 }
 
@@ -157,10 +176,13 @@ void GvretTcpServer::close_client_() {
 
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {
   if (client_fd_ < 0) return;
-  if (len >= 2 && data[0] == 0xF1) {
-    ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes)", data[1], (unsigned) len);
-  } else {
-    ESP_LOGI(TAG, "TX: %u bytes", (unsigned) len);
+  static uint32_t txlog = 0; txlog++;
+  if ((txlog & 0x0F) == 0) {  // log every 16th send to reduce spam
+    if (len >= 2 && data[0] == 0xF1) {
+      ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes)", data[1], (unsigned) len);
+    } else {
+      ESP_LOGI(TAG, "TX: %u bytes", (unsigned) len);
+    }
   }
   send(client_fd_, data, len, 0);
 }

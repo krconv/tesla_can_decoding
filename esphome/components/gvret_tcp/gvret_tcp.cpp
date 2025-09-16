@@ -124,8 +124,13 @@ void GvretTcpServer::loop() {
           constexpr size_t kMinHeader = 11;  // [F1][00][TS4][ID4][DLC1]
           if (rx_buf_.size() < kMinHeader) break;  // incomplete header
 
-          uint8_t dlc = rx_buf_[10];
+          // DLC field may pack bus index in high nibble per GVRET
+          uint8_t dlc_field = rx_buf_[10];
+          uint8_t dlc = dlc_field & 0x0F;
+          uint8_t bus = dlc_field >> 4;
           size_t record_len = kMinHeader + static_cast<size_t>(dlc);  // per-DLC length
+          ESP_LOGI(TAG, "BUILD_CAN_FRAME: dlc_field=0x%02X dlc=%u bus=%u need=%u have=%u",
+                   dlc_field, (unsigned) dlc, (unsigned) bus, (unsigned) record_len, (unsigned) rx_buf_.size());
           if (rx_buf_.size() < record_len) break;  // incomplete data
 
           canbus::CanFrame f{};
@@ -143,9 +148,7 @@ void GvretTcpServer::loop() {
 
           for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
 
-          // debug log
-          ESP_LOGI(TAG, "  CAN frame: ID=0x%X %s DLC=%u Data=", (unsigned) f.can_id, (f.use_extended_id ? "EXT" : "STD"), (unsigned) f.can_data_length_code);
-          // on_transmit_.fire(f);
+          on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + record_len);
           continue;
         }

@@ -126,9 +126,11 @@ void GvretTcpServer::loop() {
         ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
         if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (no timestamp)
+          // Write to serial -> f1 0 2 1 0 0 0 8 21 72 48 2 b2 12 a1 9 0 
+
           // Expected: [F1][00][ID LE 4 (bit31=ext)][DLC][DATA...][optional 0x00 0x00]
-          constexpr size_t kMinHeader = 7;  // 2 (F1,cmd) + 4 (ID) + 1 (DLC)
-          if (rx_buf_.size() < kMinHeader) break;  // incomplete header
+          constexpr size_t header_len = 8;  // 2 (F1,cmd) + 4 (ID) + 1 (flags) + 1 (DLC)
+          if (rx_buf_.size() < header_len) break;  // incomplete header
 
           // Read ID (LE). bit31 may indicate extended frame.
           uint32_t raw = (uint32_t)rx_buf_[2] |
@@ -138,19 +140,19 @@ void GvretTcpServer::loop() {
           bool ext = (raw & 0x80000000u) != 0;
           uint32_t id = raw & (ext ? 0x1FFFFFFFu : 0x7FFu);
 
-          uint8_t dlc = rx_buf_[6];
-          if (dlc > 8) dlc = 8;  // clamp to classic CAN
-          size_t record_len = kMinHeader + (size_t) dlc + 1;
+          uint8_t data_len = rx_buf_[7];
+          if (data_len > 8) data_len = 8;  // clamp to classic CAN
+          size_t record_len = header_len + (size_t) data_len + 1;
           if (rx_buf_.size() < record_len) break;  // incomplete data
 
           canbus::CanFrame f{};
           f.use_extended_id = ext;
           f.can_id = id;
-          f.can_data_length_code = dlc;
+          f.can_data_length_code = data_len;
           f.remote_transmission_request = false;
-          for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[7 + i];
+          for (uint8_t i = 0; i < data_len && i < 8; i++) f.data[i] = rx_buf_[7 + i];
 
-          ESP_LOGI(TAG, "BUILD_CAN_FRAME parsed: id=0x%08X ext=%u dlc=%u rec_len=%u", (unsigned) f.can_id, (unsigned) f.use_extended_id, (unsigned) dlc, (unsigned) record_len);
+          ESP_LOGI(TAG, "BUILD_CAN_FRAME parsed: id=0x%08X ext=%u dlc=%u rec_len=%u", (unsigned) f.can_id, (unsigned) f.use_extended_id, (unsigned) data_len, (unsigned) record_len);
           on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + record_len);
           continue;

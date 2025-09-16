@@ -150,7 +150,9 @@ void GvretTcpServer::loop() {
           f.can_id = id;
           f.can_data_length_code = data_len;
           f.remote_transmission_request = false;
-          for (uint8_t i = 0; i < data_len && i < 8; i++) f.data[i] = rx_buf_[7 + i];
+          for (uint8_t i = 0; i < data_len; i++) f.data[i] = rx_buf_[header_len + i];
+
+          // add the data to the log line
 
           ESP_LOGI(TAG, "BUILD_CAN_FRAME parsed: id=0x%08X ext=%u dlc=%u rec_len=%u", (unsigned) f.can_id, (unsigned) f.use_extended_id, (unsigned) data_len, (unsigned) record_len);
           on_transmit_.fire(f);

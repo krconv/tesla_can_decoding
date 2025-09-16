@@ -181,6 +181,16 @@ void GvretTcpServer::accept_client_() {
     }
     ESP_LOGI(TAG, "Sending debug pattern frame on connect");
     send_record_(dbg.data(), dbg.size());
+
+    // Also send a 19B probe with known ID bytes placed explicitly to verify endianness:
+    // TS=00000000, ID bytes at positions [6..9] = 00 01 02 03, DLC=0
+    std::array<uint8_t, 19> probe{};
+    probe[0] = 0xF1; probe[1] = 0x00; // header
+    // ts bytes [2..5] already zero
+    probe[6] = 0x00; probe[7] = 0x01; probe[8] = 0x02; probe[9] = 0x03; // ID byte markers
+    probe[10] = 0; // dlc
+    ESP_LOGI(TAG, "Sending ID endianness probe frame on connect");
+    send_record_(probe.data(), probe.size());
   }
 }
 

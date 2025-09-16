@@ -120,17 +120,21 @@ void GvretTcpServer::loop() {
         uint8_t cmd = rx_buf_[1];
         ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
-        if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (19 bytes)
-          if (rx_buf_.size() < 19) break;
+        if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (variable length)
+          constexpr size_t kMinHeader = 11;  // [F1][00][TS4][ID4][DLC1]
+          if (rx_buf_.size() < kMinHeader) break;  // incomplete header
+
+          uint8_t dlc = rx_buf_[10];
+          size_t record_len = kMinHeader + static_cast<size_t>(dlc);  // per-DLC length
+          if (rx_buf_.size() < record_len) break;  // incomplete data
 
           canbus::CanFrame f{};
-          // 19B layout (current test): [F1][00][TS LE 4][ID LE 4][DLC][DATA 8]
+          // [F1][00][TS LE 4][ID LE 4][DLC][DATA...]
           // Timestamp (bytes 2..5) is ignored here
           uint32_t can_id = (uint32_t)rx_buf_[6] |
                             ((uint32_t)rx_buf_[7] << 8)  |
                             ((uint32_t)rx_buf_[8] << 16) |
                             ((uint32_t)rx_buf_[9] << 24);
-          uint8_t dlc = rx_buf_[10];
           bool ext = (can_id > 0x7FF);
           f.use_extended_id = ext;
           f.can_id = can_id & (ext ? 0x1FFFFFFF : 0x7FF);
@@ -139,8 +143,10 @@ void GvretTcpServer::loop() {
 
           for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
 
+          // debug log
+          ESP_LOGI(TAG, "  CAN frame: ID=0x%X %s DLC=%u Data=", (unsigned) f.can_id, (f.use_extended_id ? "EXT" : "STD"), (unsigned) f.can_data_length_code);
           on_transmit_.fire(f);
-          rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 19);
+          rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + record_len);
           continue;
         }
 

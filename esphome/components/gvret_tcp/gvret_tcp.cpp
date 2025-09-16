@@ -125,34 +125,32 @@ void GvretTcpServer::loop() {
         uint8_t cmd = rx_buf_[1];
         ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
-        if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (variable length)
-          constexpr size_t kMinHeader = 11;  // [F1][00][TS4][ID4][DLC1]
+        if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (no timestamp)
+          // Expected: [F1][00][ID LE 4 (bit31=ext)][DLC][DATA...][optional 0x00 0x00]
+          constexpr size_t kMinHeader = 7;  // 2 (F1,cmd) + 4 (ID) + 1 (DLC)
           if (rx_buf_.size() < kMinHeader) break;  // incomplete header
 
-          // DLC field may pack bus index in high nibble per GVRET
-          uint8_t dlc_field = rx_buf_[10];
-          uint8_t dlc = dlc_field & 0x0F;
-          uint8_t bus = dlc_field >> 4;
-          size_t record_len = kMinHeader + static_cast<size_t>(dlc);  // per-DLC length
-          ESP_LOGI(TAG, "BUILD_CAN_FRAME: dlc_field=0x%02X dlc=%u bus=%u need=%u have=%u",
-                   dlc_field, (unsigned) dlc, (unsigned) bus, (unsigned) record_len, (unsigned) rx_buf_.size());
+          // Read ID (LE). bit31 may indicate extended frame.
+          uint32_t raw = (uint32_t)rx_buf_[2] |
+                         ((uint32_t)rx_buf_[3] << 8) |
+                         ((uint32_t)rx_buf_[4] << 16) |
+                         ((uint32_t)rx_buf_[5] << 24);
+          bool ext = (raw & 0x80000000u) != 0;
+          uint32_t id = raw & (ext ? 0x1FFFFFFFu : 0x7FFu);
+
+          uint8_t dlc = rx_buf_[6];
+          if (dlc > 8) dlc = 8;  // clamp to classic CAN
+          size_t record_len = kMinHeader + (size_t) dlc + 1;
           if (rx_buf_.size() < record_len) break;  // incomplete data
 
           canbus::CanFrame f{};
-          // [F1][00][TS LE 4][ID LE 4][DLC][DATA...]
-          // Timestamp (bytes 2..5) is ignored here
-          uint32_t can_id = (uint32_t)rx_buf_[6] |
-                            ((uint32_t)rx_buf_[7] << 8)  |
-                            ((uint32_t)rx_buf_[8] << 16) |
-                            ((uint32_t)rx_buf_[9] << 24);
-          bool ext = (can_id > 0x7FF);
           f.use_extended_id = ext;
-          f.can_id = can_id & (ext ? 0x1FFFFFFF : 0x7FF);
+          f.can_id = id;
           f.can_data_length_code = dlc;
           f.remote_transmission_request = false;
+          for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[7 + i];
 
-          for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
-
+          ESP_LOGI(TAG, "BUILD_CAN_FRAME parsed: id=0x%08X ext=%u dlc=%u rec_len=%u", (unsigned) f.can_id, (unsigned) f.use_extended_id, (unsigned) dlc, (unsigned) record_len);
           on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + record_len);
           continue;

@@ -78,7 +78,7 @@ void GvretTcpServer::loop() {
           if (rx_buf_.size() < 19) break;
 
           canbus::CanFrame f{};
-          // 19B layout (current test): [F1][00][TS BE 4][ID LE 4][DLC][DATA 8]
+          // 19B layout (current test): [F1][00][TS LE 4][ID LE 4][DLC][DATA 8]
           // Timestamp (bytes 2..5) is ignored here
           uint32_t can_id = (uint32_t)rx_buf_[6] |
                             ((uint32_t)rx_buf_[7] << 8)  |
@@ -220,9 +220,9 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t
 
   out[0] = 0xF1; out[1] = 0x00;
 
-  // Timestamp big-endian (bytes 2..5)
+  // Timestamp little-endian (bytes 2..5)
   uint32_t ts = uptime_us_();
-  out[2] = (ts >> 24) & 0xFF; out[3] = (ts >> 16) & 0xFF; out[4] = (ts >> 8) & 0xFF; out[5] = ts & 0xFF;
+  out[2] = ts & 0xFF; out[3] = (ts >> 8) & 0xFF; out[4] = (ts >> 16) & 0xFF; out[5] = (ts >> 24) & 0xFF;
 
   // [11:04:06][I][gvret_tcp:243]: Frame CAN->TX (19B): id=0x00000118 dlc=8 ext=0 rtr=0 ts=646704316
 

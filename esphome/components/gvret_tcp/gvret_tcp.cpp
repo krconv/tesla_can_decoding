@@ -86,14 +86,15 @@ void GvretTcpServer::loop() {
   // flush TX queue (bounded)
   size_t tx_sent = 0;
   while (client_fd_ >= 0) {
-    std::vector<uint8_t> rec;
+    canbus::CanFrame f;
     {
       std::lock_guard<std::mutex> lk(q_mutex_);
       if (tx_queue_.empty()) break;
-      rec = tx_queue_.front();
+      f = tx_queue_.front();
       tx_queue_.pop();
     }
-    ESP_LOGI(TAG, "TX: sending %dB frame ", (int) rec.size());
+    std::vector<uint8_t> rec;
+    encode_frame_(f, rec);
     send_record_(rec.data(), rec.size());
     tx_sent++;
   }
@@ -169,15 +170,13 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   // Drop 99.99% of frames for testing (keep 1 out of 10000)
   if ((ff_cnt % 500) != 0) return;
 
-  std::vector<uint8_t> rec;
-  encode_frame_(f, rec);
   bool in_isr = in_isr_context();
   ESP_LOGI(TAG, "forward_frame(sampled): isr=%d id=0x%08X dlc=%u ext=%d rtr=%d (count=%u)",
            in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request, ff_cnt);
   {
     std::lock_guard<std::mutex> lk(q_mutex_);
     size_t before = tx_queue_.size();
-    tx_queue_.push(rec);
+    tx_queue_.push(f);
     size_t after = tx_queue_.size();
     static uint32_t qlog = 0; qlog++;
     if ((qlog & 0x3F) == 0) {
@@ -322,25 +321,30 @@ bool GvretTcpServer::handle_control_command_(uint8_t cmd) {
 void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t>& out) {
   out.clear();
   if (binary_mode_) {
-    // Binary: [TS LE 4][ID LE 4 (bit31=ext)][DLC|(bus<<4)][DATA]
+    // GVRET framed record with header:
+    // [F1][00][TS LE 4][ID LE 4][DLC][DATA...]
     uint32_t ts = uptime_us_();
     uint32_t id = (f.use_extended_id ? (f.can_id & 0x1FFFFFFF) : (f.can_id & 0x7FF));
-    if (f.use_extended_id) id |= (1u << 31);
     uint8_t dlc = f.can_data_length_code; if (dlc > 8) dlc = 8;
-    uint8_t dlc_bus = (uint8_t)((dlc & 0x0F) | ((bus_index_ & 0x0F) << 4));
 
-    out.reserve(9 + dlc);
+    out.reserve(2 + 4 + 4 + 1 + dlc);
+    out.push_back(GVRET_HEADER);
+    out.push_back(static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME));
+    // Timestamp LE
     out.push_back(ts & 0xFF);
     out.push_back((ts >> 8) & 0xFF);
     out.push_back((ts >> 16) & 0xFF);
     out.push_back((ts >> 24) & 0xFF);
+    // CAN ID LE
     out.push_back(id & 0xFF);
     out.push_back((id >> 8) & 0xFF);
     out.push_back((id >> 16) & 0xFF);
     out.push_back((id >> 24) & 0xFF);
-    out.push_back(dlc_bus);
+    // DLC
+    out.push_back(dlc);
+    // Data
     for (uint8_t i = 0; i < dlc && i < 8; i++) out.push_back(f.data[i]);
-    ESP_LOGI(TAG, "Frame CAN->TX (bin): id=0x%08X dlc=%u ext=%d bus=%u ts(us)=%u", id, dlc, f.use_extended_id, bus_index_, ts);
+    ESP_LOGI(TAG, "Frame CAN->TX (gvret bin): id=0x%08X dlc=%u ext=%d ts(us)=%u", id, dlc, f.use_extended_id, ts);
   } else {
     // Text GVRET CSV: "millis,id,ext,bus,len[,data...]\r\n"
     char line[128];

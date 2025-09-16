@@ -68,7 +68,7 @@ class GvretTcpServer : public Component {
   int client_fd_{-1};
 
   std::mutex q_mutex_;
-  std::queue<std::vector<uint8_t>> tx_queue_;
+  std::queue<canbus::CanFrame> tx_queue_;
   std::vector<uint8_t> rx_buf_;
 
   GvretOnTransmitTrigger on_transmit_;

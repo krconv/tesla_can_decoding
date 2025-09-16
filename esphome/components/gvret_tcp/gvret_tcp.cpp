@@ -100,10 +100,12 @@ void GvretTcpServer::loop() {
           continue;
         }
 
+        ESP_LOGI(TAG, "CMD: F1 %02X", cmd);
         if (cmd == 0x09) { reply_heartbeat_();  rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
         if (cmd == 0x01) { reply_time_sync_();  rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
         if (cmd == 0x07) { reply_device_info_();rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
         if (cmd == 0x06) { reply_bus_config_(); rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
+        if (cmd == 0x0C) { reply_device_serial_(); rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
 
         // Unknown F1 command -> drop full command header (2 bytes)
         ESP_LOGI(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
@@ -285,6 +287,15 @@ void GvretTcpServer::reply_bus_config_() {
   };
   send_record_(msg, sizeof(msg));
 }
+
+void GvretTcpServer::reply_device_serial_() {
+  // get mac address from esphome
+  static const char serial[] = "TODO";
+  std::vector<uint8_t> msg = {0xF1, 0x0C};
+  msg.insert(msg.end(), serial, serial + sizeof(serial));
+  send_record_(msg.data(), msg.size());
+}
+
 
 } // namespace gvret_tcp
 } // namespace esphome

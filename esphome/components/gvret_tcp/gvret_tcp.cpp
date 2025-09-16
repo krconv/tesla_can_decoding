@@ -69,7 +69,12 @@ void GvretTcpServer::loop() {
       size_t parsed = 0;
       while (!rx_buf_.empty()) {
         // 0xE7 -> enable binary (no-op)
-        if (rx_buf_[0] == 0xE7) { ESP_LOGI(TAG, "CMD: E7 (enable binary)"); rx_buf_.erase(rx_buf_.begin()); continue; }
+        if (rx_buf_[0] == 0xE7) { 
+          ESP_LOGI(TAG, "CMD: E7 (enable binary)");
+          rx_buf_.erase(rx_buf_.begin());
+          binary_mode_ = true;
+          continue; 
+        }
 
         if (rx_buf_[0] != 0xF1 || rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
@@ -191,7 +196,13 @@ void GvretTcpServer::accept_client_() {
 }
 
 void GvretTcpServer::close_client_() {
-  if (client_fd_ >= 0) { ESP_LOGI(TAG, "Client disconnected"); close(client_fd_); client_fd_ = -1; rx_buf_.clear(); }
+  if (client_fd_ >= 0) { 
+    ESP_LOGI(TAG, "Client disconnected"); 
+    close(client_fd_); 
+    client_fd_ = -1; 
+    binary_mode_ = false;
+    rx_buf_.clear(); 
+  }
 }
 
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {

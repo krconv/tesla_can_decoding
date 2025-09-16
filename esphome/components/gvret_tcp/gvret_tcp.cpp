@@ -169,6 +169,18 @@ void GvretTcpServer::accept_client_() {
     client_fd_ = cfd;
     rx_buf_.clear();
     ESP_LOGI(TAG, "Client connected");
+
+    // Send a single debug GVRET record with recognizable pattern bytes:
+    // [F1][00][00][00][01][01][02][02]...[09][09] (continues up to 22 bytes)
+    // This helps reverse engineer field positions in external parsers.
+    std::array<uint8_t, 22> dbg{};
+    dbg[0] = 0xF1; dbg[1] = 0x00;
+    for (size_t i = 2; i < dbg.size(); i++) {
+      uint8_t v = (uint8_t)(((i - 2) / 2) & 0xFF);
+      dbg[i] = v;
+    }
+    ESP_LOGI(TAG, "Sending debug pattern frame on connect");
+    send_record_(dbg.data(), dbg.size());
   }
 }
 

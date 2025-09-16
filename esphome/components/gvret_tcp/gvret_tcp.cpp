@@ -13,6 +13,48 @@ namespace esphome {
 namespace gvret_tcp {
 
 static const char *const TAG = "gvret_tcp";
+static constexpr uint8_t GVRET_HEADER = 0xF1;
+static constexpr uint8_t COMMAND_ENABLE_BINARY_OUTPUT = 0xE7;  // top-level switch to binary output
+
+// GVRET protocol commands (under 0xF1 header)
+enum class Command : uint8_t {
+  COMMAND_BUILD_CAN_FRAME = 0,
+  COMMAND_TIME_SYNC = 1,
+  COMMAND_DIGITAL_INPUTS = 2,
+  COMMAND_ANALOG_INPUTS = 3,
+  COMMAND_SET_DIGITAL_OUTPUT = 4,
+  COMMAND_SETUP_CAN_BUS = 5,
+  COMMAND_GET_CAN_BUS_PARAMETERS = 6,
+  COMMAND_GET_DEVICE_INFO = 7,
+  COMMAND_SET_SOFTWARE_MODE = 8,
+  COMMAND_KEEP_ALIVE = 9,
+  COMMAND_SET_SYSTEM_TYPE = 10,
+  COMMAND_ECHO_CAN_FRAME = 11,
+  COMMAND_GET_NUMBER_OF_BUSES = 12,
+  COMMAND_GET_EXTERNAL_BUSES = 13,
+  COMMAND_SET_EXTERNAL_BUSES = 14,
+};
+
+static inline const char *command_name(uint8_t raw) {
+  switch (static_cast<Command>(raw)) {
+    case Command::COMMAND_BUILD_CAN_FRAME: return "COMMAND_BUILD_CAN_FRAME";
+    case Command::COMMAND_TIME_SYNC: return "COMMAND_TIME_SYNC";
+    case Command::COMMAND_DIGITAL_INPUTS: return "COMMAND_DIGITAL_INPUTS";
+    case Command::COMMAND_ANALOG_INPUTS: return "COMMAND_ANALOG_INPUTS";
+    case Command::COMMAND_SET_DIGITAL_OUTPUT: return "COMMAND_SET_DIGITAL_OUTPUT";
+    case Command::COMMAND_SETUP_CAN_BUS: return "COMMAND_SETUP_CAN_BUS";
+    case Command::COMMAND_GET_CAN_BUS_PARAMETERS: return "COMMAND_GET_CAN_BUS_PARAMETERS";
+    case Command::COMMAND_GET_DEVICE_INFO: return "COMMAND_GET_DEVICE_INFO";
+    case Command::COMMAND_SET_SOFTWARE_MODE: return "COMMAND_SET_SOFTWARE_MODE";
+    case Command::COMMAND_KEEP_ALIVE: return "COMMAND_KEEP_ALIVE";
+    case Command::COMMAND_SET_SYSTEM_TYPE: return "COMMAND_SET_SYSTEM_TYPE";
+    case Command::COMMAND_ECHO_CAN_FRAME: return "COMMAND_ECHO_CAN_FRAME";
+    case Command::COMMAND_GET_NUMBER_OF_BUSES: return "COMMAND_GET_NUMBER_OF_BUSES";
+    case Command::COMMAND_GET_EXTERNAL_BUSES: return "COMMAND_GET_EXTERNAL_BUSES";
+    case Command::COMMAND_SET_EXTERNAL_BUSES: return "COMMAND_SET_EXTERNAL_BUSES";
+    default: return "UNKNOWN";
+  }
+}
 static inline bool in_isr_context() {
 #if defined(xPortInIsrContext)
   return xPortInIsrContext();
@@ -68,19 +110,19 @@ void GvretTcpServer::loop() {
 
       size_t parsed = 0;
       while (!rx_buf_.empty()) {
-        // 0xE7 -> enable binary (no-op)
-        if (rx_buf_[0] == 0xE7) { 
-          ESP_LOGI(TAG, "CMD: E7 (enable binary)");
+        // Enable binary output mode
+        if (rx_buf_[0] == COMMAND_ENABLE_BINARY_OUTPUT) { 
+          ESP_LOGI(TAG, "CMD: COMMAND_ENABLE_BINARY_OUTPUT (enable binary output)");
           rx_buf_.erase(rx_buf_.begin());
           binary_mode_ = true;
           continue; 
         }
 
-        if (rx_buf_[0] != 0xF1 || rx_buf_.size() < 2) break;
+        if (rx_buf_[0] != GVRET_HEADER || rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
-        ESP_LOGI(TAG, "CMD: F1 %02X", cmd);
+        ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 
-        if (cmd == 0x00) {  // frame record (19 bytes)
+        if (cmd == static_cast<uint8_t>(Command::COMMAND_BUILD_CAN_FRAME)) {  // frame record (19 bytes)
           if (rx_buf_.size() < 19) break;
 
           canbus::CanFrame f{};
@@ -105,12 +147,8 @@ void GvretTcpServer::loop() {
           continue;
         }
 
-        ESP_LOGI(TAG, "CMD: F1 %02X", cmd);
-        if (cmd == 0x09) { reply_heartbeat_();  rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
-        if (cmd == 0x01) { reply_time_sync_();  rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
-        if (cmd == 0x07) { reply_device_info_();rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
-        if (cmd == 0x06) { reply_bus_config_(); rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
-        if (cmd == 0x0C) { reply_device_serial_(); rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
+        // Control commands that require responses
+        if (handle_control_command_(cmd)) { rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
 
         // Unknown F1 command -> drop full command header (2 bytes)
         ESP_LOGI(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
@@ -227,7 +265,55 @@ bool GvretTcpServer::recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len) 
   return false;
 }
 
-// ---- Encode (F1 00 record, 19 bytes) ----
+bool GvretTcpServer::handle_control_command_(uint8_t cmd) {
+  switch (static_cast<Command>(cmd)) {
+    case Command::COMMAND_KEEP_ALIVE: {
+      const uint8_t msg[4] = {GVRET_HEADER, 0x09, 0xDE, 0xAD};
+      send_record_(msg, sizeof(msg));
+      return true;
+    }
+    case Command::COMMAND_TIME_SYNC: {
+      uint32_t ts = uptime_us_();
+      const uint8_t msg[6] = {GVRET_HEADER, 0x01, (uint8_t) ts, (uint8_t) (ts >> 8), (uint8_t) (ts >> 16), (uint8_t) (ts >> 24)};
+      send_record_(msg, sizeof(msg));
+      return true;
+    }
+    case Command::COMMAND_GET_DEVICE_INFO: {
+      // [F1][07][build_lo][build_hi][eeprom_ver][fileOutputType][autoStartLogging][singleWire_Enabled]
+      const uint8_t build_lo = 0x01, build_hi = 0x00;
+      const uint8_t eeprom_ver = 0x01;
+      const uint8_t file_output_type = binary_mode_ ? 0x01 : 0x00; // 0=GVRET CSV, 1=Binary
+      const uint8_t auto_start_logging = 0x00;
+      const uint8_t singlewire_enabled = 0x00;
+      const uint8_t msg[8] = {GVRET_HEADER, 0x07, build_lo, build_hi, eeprom_ver, file_output_type, auto_start_logging, singlewire_enabled};
+      send_record_(msg, sizeof(msg));
+      return true;
+    }
+    case Command::COMMAND_GET_CAN_BUS_PARAMETERS: {
+      // 12-byte reply covering CAN0 and CAN1
+      const uint8_t can0_enabled = 1, can0_listen_only = 0;
+      const uint8_t can1_enabled = 0, can1_listen_only = 0, sw_enabled = 0;
+      const uint32_t can0_speed = 500000; // adjust if available from config
+      const uint32_t can1_speed = 0;
+      const uint8_t msg[12] = {
+        GVRET_HEADER, 0x06,
+        (uint8_t)(can0_enabled | (can0_listen_only << 4)),
+        (uint8_t)(can0_speed & 0xFF), (uint8_t)(can0_speed >> 8), (uint8_t)(can0_speed >> 16), (uint8_t)(can0_speed >> 24),
+        (uint8_t)(can1_enabled | (can1_listen_only << 4) | (sw_enabled << 6)),
+        (uint8_t)(can1_speed & 0xFF), (uint8_t)(can1_speed >> 8), (uint8_t)(can1_speed >> 16), (uint8_t)(can1_speed >> 24)
+      };
+      send_record_(msg, sizeof(msg));
+      return true;
+    }
+    case Command::COMMAND_GET_NUMBER_OF_BUSES: {
+      const uint8_t msg[3] = {GVRET_HEADER, 0x0C, 0x01};
+      send_record_(msg, sizeof(msg));
+      return true;
+    }
+    default:
+      return false;
+  }
+}
 
 void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t>& out) {
   out.clear();
@@ -268,45 +354,6 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::vector<uint8_
     ESP_LOGI(TAG, "Frame CAN->TX (csv): id=0x%08X dlc=%u ext=%d bus=%u", f.can_id, f.can_data_length_code, f.use_extended_id, bus_index_);
   }
 }
-
-// ---- Replies ----
-
-void GvretTcpServer::reply_heartbeat_() {
-  const uint8_t msg[4] = {0xF1, 0x09, 0xDE, 0xAD};
-  send_record_(msg, sizeof(msg));
-}
-
-void GvretTcpServer::reply_time_sync_() {
-  uint32_t ts = uptime_us_();
-  const uint8_t msg[6] = {0xF1, 0x01, (uint8_t)ts, (uint8_t)(ts >> 8), (uint8_t)(ts >> 16), (uint8_t)(ts >> 24)};
-  send_record_(msg, sizeof(msg));
-}
-
-void GvretTcpServer::reply_device_info_() {
-  static const char name[] = "ESPHome-GVRET";
-  std::vector<uint8_t> msg = {0xF1, 0x07, 0x02, /*version*/ 1, /*nbuses*/ 1, /*features*/ 0};
-  msg.insert(msg.end(), name, name + sizeof(name)); // include NUL
-  send_record_(msg.data(), msg.size());
-}
-
-void GvretTcpServer::reply_bus_config_() {
-  const uint32_t bitrate = 500000;  // match your YAML bit_rate
-  const uint8_t msg[1 + 1 + 1 + 4 + 1] = {
-      0xF1, 0x06, 0x00,
-      (uint8_t)bitrate, (uint8_t)(bitrate >> 8), (uint8_t)(bitrate >> 16), (uint8_t)(bitrate >> 24),
-      0x00  // listen_only=false
-  };
-  send_record_(msg, sizeof(msg));
-}
-
-void GvretTcpServer::reply_device_serial_() {
-  // get mac address from esphome
-  static const char serial[] = "TODO";
-  std::vector<uint8_t> msg = {0xF1, 0x0C};
-  msg.insert(msg.end(), serial, serial + sizeof(serial));
-  send_record_(msg.data(), msg.size());
-}
-
 
 } // namespace gvret_tcp
 } // namespace esphome

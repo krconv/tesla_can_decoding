@@ -57,11 +57,7 @@ class GvretTcpServer : public Component {
   // Binary mode: [TS LE 4][ID LE 4 (bit31=ext)][DLC|(bus<<4)][DATA]
   // Text mode:   "millis,id,ext,bus,len[,data...]\r\n"
   void encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t> &out);
-  void reply_heartbeat_();    // F1 09 -> F1 09 DE AD
-  void reply_time_sync_();    // F1 01 -> F1 01 <u32 micros>
-  void reply_device_info_();  // F1 07 -> F1 07 <meta + "ESPHome-GVRET\0">
-  void reply_bus_config_();   // F1 06 -> F1 06 <bitrate…>
-  void reply_device_serial_(); // F1 0C -> F1 0C <serial number string>
+  bool handle_control_command_(uint8_t cmd); // Handles non-frame commands under 0xF1
 
   uint32_t uptime_us_() const { return gvret_micros(); }
 

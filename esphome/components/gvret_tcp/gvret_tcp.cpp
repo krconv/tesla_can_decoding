@@ -145,7 +145,7 @@ void GvretTcpServer::loop() {
 
           // debug log
           ESP_LOGI(TAG, "  CAN frame: ID=0x%X %s DLC=%u Data=", (unsigned) f.can_id, (f.use_extended_id ? "EXT" : "STD"), (unsigned) f.can_data_length_code);
-          on_transmit_.fire(f);
+          // on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + record_len);
           continue;
         }

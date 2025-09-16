@@ -78,14 +78,17 @@ void GvretTcpServer::loop() {
           if (rx_buf_.size() < 19) break;
 
           canbus::CanFrame f{};
-          // 19B layout: [F1][00][TS BE 4][ID BE 4][DLC][DATA 8]
+          // 19B layout (current test): [F1][00][TS BE 4][ID LE 4][DLC][DATA 8]
           // Timestamp (bytes 2..5) is ignored here
-          uint32_t can_id = ((uint32_t)rx_buf_[6] << 24) | ((uint32_t)rx_buf_[7] << 16) |
-                            ((uint32_t)rx_buf_[8] << 8)  | ((uint32_t)rx_buf_[9]);
+          uint32_t can_id = (uint32_t)rx_buf_[6] |
+                            ((uint32_t)rx_buf_[7] << 8)  |
+                            ((uint32_t)rx_buf_[8] << 16) |
+                            ((uint32_t)rx_buf_[9] << 24);
           uint8_t dlc = rx_buf_[10];
-          f.can_id = can_id;
+          bool ext = (can_id > 0x7FF);
+          f.use_extended_id = ext;
+          f.can_id = can_id & (ext ? 0x1FFFFFFF : 0x7FF);
           f.can_data_length_code = dlc;
-          f.use_extended_id = (can_id > 0x7FF);
           f.remote_transmission_request = false;
 
           for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
@@ -176,21 +179,11 @@ void GvretTcpServer::accept_client_() {
     std::array<uint8_t, 19> dbg{};
     dbg[0] = 0xF1; dbg[1] = 0x00;
     for (size_t i = 2; i < dbg.size(); i++) {
-      uint8_t v = (uint8_t)(((i - 2) / 2) & 0xFF);
+      uint8_t v = (uint8_t)((i - 2) & 0xFF);
       dbg[i] = v;
     }
     ESP_LOGI(TAG, "Sending debug pattern frame on connect");
     send_record_(dbg.data(), dbg.size());
-
-    // Also send a 19B probe with known ID bytes placed explicitly to verify endianness:
-    // TS=00000000, ID bytes at positions [6..9] = 00 01 02 03, DLC=0
-    std::array<uint8_t, 19> probe{};
-    probe[0] = 0xF1; probe[1] = 0x00; // header
-    // ts bytes [2..5] already zero
-    probe[6] = 0x00; probe[7] = 0x01; probe[8] = 0x02; probe[9] = 0x03; // ID byte markers
-    probe[10] = 0; // dlc
-    ESP_LOGI(TAG, "Sending ID endianness probe frame on connect");
-    send_record_(probe.data(), probe.size());
   }
 }
 
@@ -231,9 +224,12 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t
   uint32_t ts = uptime_us_();
   out[2] = (ts >> 24) & 0xFF; out[3] = (ts >> 16) & 0xFF; out[4] = (ts >> 8) & 0xFF; out[5] = ts & 0xFF;
 
-  // CAN ID big-endian (bytes 6..9)
-  uint32_t id = f.can_id;
-  out[6] = (id >> 24) & 0xFF; out[7] = (id >> 16) & 0xFF; out[8] = (id >> 8) & 0xFF; out[9] = id & 0xFF;
+  // [11:04:06][I][gvret_tcp:243]: Frame CAN->TX (19B): id=0x00000118 dlc=8 ext=0 rtr=0 ts=646704316
+
+
+  // CAN ID little-endian (bytes 6..9). Mask to the correct width.
+  uint32_t id = (f.use_extended_id ? (f.can_id & 0x1FFFFFFF) : (f.can_id & 0x7FF));
+  out[6] = id & 0xFF; out[7] = (id >> 8) & 0xFF; out[8] = (id >> 16) & 0xFF; out[9] = (id >> 24) & 0xFF;
 
   uint8_t dlc = f.can_data_length_code;
   if (dlc > 8) dlc = 8;

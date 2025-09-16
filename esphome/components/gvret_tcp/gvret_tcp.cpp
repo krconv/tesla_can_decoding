@@ -116,7 +116,12 @@ void GvretTcpServer::loop() {
           continue; 
         }
 
-        if (rx_buf_[0] != GVRET_HEADER || rx_buf_.size() < 2) break;
+        if (rx_buf_[0] != GVRET_HEADER) {
+          ESP_LOGW(TAG, "Malformed GVRET header 0x%02X dropped", rx_buf_[0]);
+          rx_buf_.erase(rx_buf_.begin());
+          continue;
+        } 
+        if (rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
         ESP_LOGI(TAG, "CMD: %s (0x%02X)", command_name(cmd), cmd);
 

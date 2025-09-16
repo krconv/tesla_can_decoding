@@ -43,14 +43,14 @@ void GvretTcpServer::loop() {
   // flush TX queue (bounded)
   size_t tx_sent = 0;
   while (client_fd_ >= 0) {
-    std::array<uint8_t, 22> rec;
+    std::array<uint8_t, 19> rec;
     {
       std::lock_guard<std::mutex> lk(q_mutex_);
       if (tx_queue_.empty()) break;
       rec = tx_queue_.front();
       tx_queue_.pop();
     }
-    ESP_LOGI(TAG, "TX: sending 22B GVRET record (queued)");
+    ESP_LOGI(TAG, "TX: sending 19B frame (queued)");
     send_record_(rec.data(), rec.size());
     tx_sent++;
     if (tx_sent >= 16) break;  // cap per iteration
@@ -74,26 +74,25 @@ void GvretTcpServer::loop() {
         uint8_t cmd = rx_buf_[1];
         ESP_LOGI(TAG, "CMD: F1 %02X", cmd);
 
-        if (cmd == 0x00) {  // frame record (22 bytes)
-          if (rx_buf_.size() < 22) break;
+        if (cmd == 0x00) {  // frame record (19 bytes)
+          if (rx_buf_.size() < 19) break;
 
           canbus::CanFrame f{};
-          // GVRET binary frame layout: [F1][00][bus][id0][id1][id2][id3][dlc][flags0][flags1][ts0..3][data0..7]
-          uint32_t can_id = (uint32_t)rx_buf_[3] | ((uint32_t)rx_buf_[4] << 8) |
-                            ((uint32_t)rx_buf_[5] << 16) | ((uint32_t)rx_buf_[6] << 24);
-          uint8_t dlc = rx_buf_[7];
+          // 19B layout: [F1][00][TS BE 4][ID BE 4][DLC][DATA 8]
+          // Timestamp (bytes 2..5) is ignored here
+          uint32_t can_id = ((uint32_t)rx_buf_[6] << 24) | ((uint32_t)rx_buf_[7] << 16) |
+                            ((uint32_t)rx_buf_[8] << 8)  | ((uint32_t)rx_buf_[9]);
+          uint8_t dlc = rx_buf_[10];
           f.can_id = can_id;
           f.can_data_length_code = dlc;
+          f.use_extended_id = (can_id > 0x7FF);
+          f.remote_transmission_request = false;
 
-          uint16_t flags = (uint16_t)rx_buf_[8] | ((uint16_t)rx_buf_[9] << 8);
-          f.use_extended_id = (flags & 0x0001) != 0;
-          f.remote_transmission_request = (flags & 0x0002) != 0;
+          for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[11 + i];
 
-          for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[14 + i];
-
-          ESP_LOGI(TAG, "Frame RX->CAN: id=0x%08X dlc=%u ext=%d rtr=%d", f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
+          ESP_LOGI(TAG, "Frame RX->CAN (19B): id=0x%08X dlc=%u ext=%d rtr=%d", f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
           on_transmit_.fire(f);
-          rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 22);
+          rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 19);
           continue;
         }
 
@@ -121,9 +120,9 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   static uint32_t ff_cnt = 0;
   ff_cnt++;
   // Drop 99.99% of frames for testing (keep 1 out of 10000)
-  if ((ff_cnt % 1000) != 0) return;
+  if ((ff_cnt % 500) != 0) return;
 
-  std::array<uint8_t, 22> rec;
+  std::array<uint8_t, 19> rec;
   encode_frame_(f, rec);
   bool in_isr = in_isr_context();
   ESP_LOGI(TAG, "forward_frame(sampled): isr=%d id=0x%08X dlc=%u ext=%d rtr=%d (count=%u)",
@@ -170,10 +169,11 @@ void GvretTcpServer::accept_client_() {
     rx_buf_.clear();
     ESP_LOGI(TAG, "Client connected");
 
-    // Send a single debug GVRET record with recognizable pattern bytes:
-    // [F1][00][00][00][01][01][02][02]...[09][09] (continues up to 22 bytes)
+
+    // Send a single debug record with recognizable pattern bytes:
+    // [F1][00][00][00][01][01][02][02]...[09][09] (continues up to 19 bytes)
     // This helps reverse engineer field positions in external parsers.
-    std::array<uint8_t, 22> dbg{};
+    std::array<uint8_t, 19> dbg{};
     dbg[0] = 0xF1; dbg[1] = 0x00;
     for (size_t i = 2; i < dbg.size(); i++) {
       uint8_t v = (uint8_t)(((i - 2) / 2) & 0xFF);
@@ -210,29 +210,27 @@ bool GvretTcpServer::recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len) 
   return false;
 }
 
-// ---- GVRET encode (F1 00 record, 22 bytes) ----
+// ---- Encode (F1 00 record, 19 bytes) ----
 
-void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t,22>& out) {
+void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t,19>& out) {
   for (auto &b : out) b = 0;
 
-  out[0] = 0xF1; out[1] = 0x00; out[2] = bus_index_;
+  out[0] = 0xF1; out[1] = 0x00;
 
-  // GVRET binary frame layout: [F1][00][bus][id0][id1][id2][id3][dlc][flags0][flags1][ts0..3][data0..7]
+  // Timestamp big-endian (bytes 2..5)
+  uint32_t ts = uptime_us_();
+  out[2] = (ts >> 24) & 0xFF; out[3] = (ts >> 16) & 0xFF; out[4] = (ts >> 8) & 0xFF; out[5] = ts & 0xFF;
+
+  // CAN ID big-endian (bytes 6..9)
   uint32_t id = f.can_id;
-  out[3] = id & 0xFF; out[4] = (id >> 8) & 0xFF; out[5] = (id >> 16) & 0xFF; out[6] = (id >> 24) & 0xFF;
+  out[6] = (id >> 24) & 0xFF; out[7] = (id >> 16) & 0xFF; out[8] = (id >> 8) & 0xFF; out[9] = id & 0xFF;
 
   uint8_t dlc = f.can_data_length_code;
   if (dlc > 8) dlc = 8;
-  out[7] = dlc;
+  out[10] = dlc;
 
-  uint16_t flags = (f.use_extended_id ? 0x0001 : 0) | (f.remote_transmission_request ? 0x0002 : 0);
-  out[8] = flags & 0xFF; out[9] = flags >> 8;
-
-  uint32_t ts = uptime_us_();
-  out[10] = ts & 0xFF; out[11] = (ts >> 8) & 0xFF; out[12] = (ts >> 16) & 0xFF; out[13] = (ts >> 24) & 0xFF;
-
-  for (uint8_t i = 0; i < dlc && i < 8; i++) out[14 + i] = f.data[i];
-  ESP_LOGI(TAG, "Frame CAN->TX: id=0x%08X dlc=%u ext=%d rtr=%d ts=%u", id, dlc, f.use_extended_id, f.remote_transmission_request, ts);
+  for (uint8_t i = 0; i < dlc && i < 8; i++) out[11 + i] = f.data[i];
+  ESP_LOGI(TAG, "Frame CAN->TX (19B): id=0x%08X dlc=%u ext=%d rtr=%d ts=%u", id, dlc, f.use_extended_id, f.remote_transmission_request, ts);
 }
 
 // ---- Replies ----

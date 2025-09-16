@@ -118,14 +118,16 @@ void GvretTcpServer::dump_config() {
 }
 
 void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
+  static uint32_t ff_cnt = 0;
+  ff_cnt++;
+  // Drop 99.99% of frames for testing (keep 1 out of 10000)
+  if ((ff_cnt % 1000) != 0) return;
+
   std::array<uint8_t, 22> rec;
   encode_frame_(f, rec);
   bool in_isr = in_isr_context();
-  static uint32_t ff_cnt = 0;
-  ff_cnt++;
-  if (in_isr || (ff_cnt & 0x3F) == 0) {  // log every 64th call or always if ISR
-    ESP_LOGI(TAG, "forward_frame: isr=%d id=0x%08X dlc=%u ext=%d rtr=%d", in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
-  }
+  ESP_LOGI(TAG, "forward_frame(sampled): isr=%d id=0x%08X dlc=%u ext=%d rtr=%d (count=%u)",
+           in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request, ff_cnt);
   {
     std::lock_guard<std::mutex> lk(q_mutex_);
     size_t before = tx_queue_.size();

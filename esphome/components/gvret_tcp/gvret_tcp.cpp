@@ -1,6 +1,10 @@
 #include "gvret_tcp.h"
 #include "esphome/core/log.h"
 #include "esphome/components/wifi/wifi_component.h"
+extern "C" {
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+}
 
 using esphome::wifi::global_wifi_component;
 
@@ -8,6 +12,13 @@ namespace esphome {
 namespace gvret_tcp {
 
 static const char *const TAG = "gvret_tcp";
+static inline bool in_isr_context() {
+#if defined(xPortInIsrContext)
+  return xPortInIsrContext();
+#else
+  return false;
+#endif
+}
 
 void GvretTcpServer::setup() {
   rx_buf_.reserve(512);
@@ -15,7 +26,11 @@ void GvretTcpServer::setup() {
 
 void GvretTcpServer::loop() {
   if (server_fd_ < 0) {
-    if (global_wifi_component == nullptr || !global_wifi_component->is_connected()) return;
+    if (global_wifi_component == nullptr || !global_wifi_component->is_connected()) {
+      ESP_LOGI(TAG, "Server not started: WiFi not connected");
+      return;
+    }
+    ESP_LOGI(TAG, "Starting GVRET TCP server on port %u", port_);
     start_server_();
     return;
   }
@@ -30,6 +45,7 @@ void GvretTcpServer::loop() {
       rec = tx_queue_.front();
       tx_queue_.pop();
     }
+    ESP_LOGI(TAG, "TX: sending 22B GVRET record (queued)");
     send_record_(rec.data(), rec.size());
   }
 
@@ -38,14 +54,16 @@ void GvretTcpServer::loop() {
     uint8_t buf[128];
     ssize_t rlen = 0;
     if (recv_bytes_(buf, sizeof(buf), rlen) && rlen > 0) {
+      ESP_LOGI(TAG, "RX: received %d bytes", (int) rlen);
       rx_buf_.insert(rx_buf_.end(), buf, buf + rlen);
 
       while (!rx_buf_.empty()) {
         // 0xE7 -> enable binary (no-op)
-        if (rx_buf_[0] == 0xE7) { rx_buf_.erase(rx_buf_.begin()); continue; }
+        if (rx_buf_[0] == 0xE7) { ESP_LOGI(TAG, "CMD: E7 (enable binary)"); rx_buf_.erase(rx_buf_.begin()); continue; }
 
         if (rx_buf_[0] != 0xF1 || rx_buf_.size() < 2) break;
         uint8_t cmd = rx_buf_[1];
+        ESP_LOGI(TAG, "CMD: F1 %02X", cmd);
 
         if (cmd == 0x00) {  // frame record (22 bytes)
           if (rx_buf_.size() < 22) break;
@@ -64,6 +82,7 @@ void GvretTcpServer::loop() {
 
           for (uint8_t i = 0; i < dlc && i < 8; i++) f.data[i] = rx_buf_[14 + i];
 
+          ESP_LOGI(TAG, "Frame RX->CAN: id=0x%08X dlc=%u ext=%d rtr=%d", f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
           on_transmit_.fire(f);
           rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 22);
           continue;
@@ -75,6 +94,7 @@ void GvretTcpServer::loop() {
         if (cmd == 0x06) { reply_bus_config_(); rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2); continue; }
 
         // Unknown F1 command -> drop full command header (2 bytes)
+        ESP_LOGI(TAG, "Unknown F1 command 0x%02X, skipping", cmd);
         rx_buf_.erase(rx_buf_.begin(), rx_buf_.begin() + 2);
       }
     }
@@ -88,15 +108,22 @@ void GvretTcpServer::dump_config() {
 void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   std::array<uint8_t, 22> rec;
   encode_frame_(f, rec);
-  std::lock_guard<std::mutex> lk(q_mutex_);
-  tx_queue_.push(rec);
+  bool in_isr = in_isr_context();
+  ESP_LOGI(TAG, "forward_frame: isr=%d id=0x%08X dlc=%u ext=%d rtr=%d", in_isr ? 1 : 0, f.can_id, f.can_data_length_code, f.use_extended_id, f.remote_transmission_request);
+  {
+    std::lock_guard<std::mutex> lk(q_mutex_);
+    size_t before = tx_queue_.size();
+    tx_queue_.push(rec);
+    size_t after = tx_queue_.size();
+    ESP_LOGI(TAG, "queued GVRET record: %u -> %u", (unsigned) before, (unsigned) after);
+  }
 }
 
 // ---- networking ----
 
 void GvretTcpServer::start_server_() {
   server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd_ < 0) return;
+  if (server_fd_ < 0) { ESP_LOGI(TAG, "socket() failed: errno=%d", errno); return; }
 
   int yes = 1; setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
@@ -105,8 +132,8 @@ void GvretTcpServer::start_server_() {
   addr.sin_port = htons(port_);
   addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  if (bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) { close(server_fd_); server_fd_ = -1; return; }
-  if (listen(server_fd_, 1) < 0) { close(server_fd_); server_fd_ = -1; return; }
+  if (bind(server_fd_, (sockaddr*)&addr, sizeof(addr)) < 0) { ESP_LOGI(TAG, "bind() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
+  if (listen(server_fd_, 1) < 0) { ESP_LOGI(TAG, "listen() failed: errno=%d", errno); close(server_fd_); server_fd_ = -1; return; }
 
   int flags = fcntl(server_fd_, F_GETFL, 0);
   fcntl(server_fd_, F_SETFL, flags | O_NONBLOCK);
@@ -120,15 +147,21 @@ void GvretTcpServer::accept_client_() {
     fcntl(cfd, F_SETFL, flags | O_NONBLOCK);
     client_fd_ = cfd;
     rx_buf_.clear();
+    ESP_LOGI(TAG, "Client connected");
   }
 }
 
 void GvretTcpServer::close_client_() {
-  if (client_fd_ >= 0) { close(client_fd_); client_fd_ = -1; rx_buf_.clear(); }
+  if (client_fd_ >= 0) { ESP_LOGI(TAG, "Client disconnected"); close(client_fd_); client_fd_ = -1; rx_buf_.clear(); }
 }
 
 void GvretTcpServer::send_record_(const uint8_t *data, size_t len) {
   if (client_fd_ < 0) return;
+  if (len >= 2 && data[0] == 0xF1) {
+    ESP_LOGI(TAG, "TX CMD: F1 %02X (%u bytes)", data[1], (unsigned) len);
+  } else {
+    ESP_LOGI(TAG, "TX: %u bytes", (unsigned) len);
+  }
   send(client_fd_, data, len, 0);
 }
 
@@ -163,6 +196,7 @@ void GvretTcpServer::encode_frame_(const canbus::CanFrame &f, std::array<uint8_t
   out[10] = ts & 0xFF; out[11] = (ts >> 8) & 0xFF; out[12] = (ts >> 16) & 0xFF; out[13] = (ts >> 24) & 0xFF;
 
   for (uint8_t i = 0; i < dlc && i < 8; i++) out[14 + i] = f.data[i];
+  ESP_LOGI(TAG, "Frame CAN->TX: id=0x%08X dlc=%u ext=%d rtr=%d ts=%u", id, dlc, f.use_extended_id, f.remote_transmission_request, ts);
 }
 
 // ---- Replies ----

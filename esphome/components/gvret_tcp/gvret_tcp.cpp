@@ -168,7 +168,10 @@ void GvretTcpServer::forward_frame(const canbus::CanFrame &f) {
   static uint32_t ff_cnt = 0;
   ff_cnt++;
   // Drop 99.99% of frames for testing (keep 1 out of 10000)
-  if ((ff_cnt % 500) != 0) return;
+  if ((ff_cnt % 50) != 0) return;
+
+  // Only buffer when a client is connected
+  if (client_fd_ < 0) return;
 
   bool in_isr = in_isr_context();
   ESP_LOGI(TAG, "forward_frame(sampled): isr=%d id=0x%08X dlc=%u ext=%d rtr=%d (count=%u)",
@@ -214,19 +217,6 @@ void GvretTcpServer::accept_client_() {
     client_fd_ = cfd;
     rx_buf_.clear();
     ESP_LOGI(TAG, "Client connected");
-
-
-    // Send a single debug record with recognizable pattern bytes:
-    // [F1][00][00][00][01][01][02][02]...[09][09] (continues up to 19 bytes)
-    // This helps reverse engineer field positions in external parsers.
-    std::array<uint8_t, 19> dbg{};
-    dbg[0] = 0xF1; dbg[1] = 0x00;
-    for (size_t i = 2; i < dbg.size(); i++) {
-      uint8_t v = (uint8_t)((i - 2) & 0xFF);
-      dbg[i] = v;
-    }
-    ESP_LOGI(TAG, "Sending debug pattern frame on connect");
-    send_record_(dbg.data(), dbg.size());
   }
 }
 
@@ -236,7 +226,13 @@ void GvretTcpServer::close_client_() {
     close(client_fd_); 
     client_fd_ = -1; 
     binary_mode_ = false;
-    rx_buf_.clear(); 
+    rx_buf_.clear();
+    // Drop any buffered frames on disconnect
+    {
+      std::lock_guard<std::mutex> lk(q_mutex_);
+      std::queue<canbus::CanFrame> empty;
+      std::swap(tx_queue_, empty);
+    }
   }
 }
 

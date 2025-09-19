@@ -3,10 +3,6 @@
 #include "esphome/components/wifi/wifi_component.h"
 #include <cstdio>
 #include <cstring>
-extern "C" {
-#include "freertos/FreeRTOS.h"
-#include "freertos/portmacro.h"
-}
 
 using esphome::wifi::global_wifi_component;
 

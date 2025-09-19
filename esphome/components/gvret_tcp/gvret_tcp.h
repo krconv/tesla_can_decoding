@@ -50,14 +50,12 @@ class GvretTcpServer : public Component {
   void accept_client_();
   void close_client_();
   void send_record_(const uint8_t *data, size_t len);
-  bool recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len);
+  bool recv_bytes_(uint8_t *buff, size_t maxlen, ssize_t &out_len);
 
-  // gvret
-  // Encode frame according to current mode.
-  // Binary mode: [TS LE 4][ID LE 4 (bit31=ext)][DLC|(bus<<4)][DATA]
-  // Text mode:   "millis,id,ext,bus,len[,data...]\r\n"
-  void encode_frame_(const canbus::CanFrame &f, std::vector<uint8_t> &out);
-  bool handle_control_command_(uint8_t cmd); // Handles non-frame commands under 0xF1
+  bool handle_control_command_(uint8_t cmd, std::vector<uint8_t> &buffer);
+  size_t encode_frame_(const canbus::CanFrame &f, uint8_t *out);
+  static constexpr size_t MAX_BIN_RECORD = 2 + 4 + 4 + 1 + 8; // [F1][00][TS4][ID4][DLC][DATA8]
+  static constexpr size_t MAX_CSV_RECORD = 32; // conservative upper bound per line
 
   uint32_t uptime_us_() const { return gvret_micros(); }
 
@@ -67,8 +65,13 @@ class GvretTcpServer : public Component {
   int server_fd_{-1};
   int client_fd_{-1};
 
+  static constexpr size_t MAX_TX_QUEUE = 256;
   std::mutex q_mutex_;
   std::queue<canbus::CanFrame> tx_queue_;
+  uint32_t tx_dropped_{0};
+  uint32_t tx_enqueued_{0};
+  uint32_t tx_sent_{0};
+  uint32_t last_stats_us_{0};
   std::vector<uint8_t> rx_buf_;
 
   GvretOnTransmitTrigger on_transmit_;

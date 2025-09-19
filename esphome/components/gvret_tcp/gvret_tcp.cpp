@@ -2,6 +2,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/wifi/wifi_component.h"
 #include <cstdio>
+#include <cstring>
 extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
@@ -272,7 +273,7 @@ bool GvretTcpServer::recv_bytes_(uint8_t *buf, size_t maxlen, ssize_t &out_len) 
 
 bool GvretTcpServer::handle_control_command_(uint8_t cmd, std::vector<uint8_t> &buffer) {
   switch (static_cast<Command>(cmd)) {
-    case Command::COMMAND_BUILD_CAN_FRAME:
+    case Command::COMMAND_BUILD_CAN_FRAME: {
       constexpr size_t header_len = 8;  // 2 (command) + 4 (ID) + 1 (flags) + 1 (DLC)
       if (buffer.size() < header_len) {
         return true;
@@ -304,6 +305,7 @@ bool GvretTcpServer::handle_control_command_(uint8_t cmd, std::vector<uint8_t> &
       on_transmit_.fire(f);
       buffer.erase(buffer.begin(), buffer.begin() + frame_len);
       return true;
+    }
     case Command::COMMAND_ENABLE_BINARY_OUTPUT:
       binary_mode_ = true;
       if (!buffer.empty()) buffer.erase(buffer.begin());
